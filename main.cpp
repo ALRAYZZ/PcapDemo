@@ -54,6 +54,8 @@ struct UDPHeader
 #pragma pack(pop)
 
 // helper: format MAC
+// Input: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]
+// Output: "AA:BB:CC:DD:EE:FF" 
 string mac_to_string(const uint8_t mac[6])
 {
 	char buf[32];
@@ -63,6 +65,8 @@ string mac_to_string(const uint8_t mac[6])
 }
 
 // helper: format IPv4
+// Input: 0x7F000001 (network byte order)  -- represents 127.0.0.1
+// Output: "127.0.0.1"
 string ipv4_to_string(uint32_t addr_be)
 {
 	uint32_t a = ntohl(addr_be);
@@ -96,6 +100,8 @@ void print_error_and_exit(const string& msg, const char* err = nullptr)
 	exit(1);
 }
 
+// Input: Raw binary data from network
+// Output: Parsed and printed packet info human readable
 void packet_handler(u_char* user, const pcap_pkthdr* h, const u_char* bytes)
 {
 	// Basic checks
@@ -315,7 +321,7 @@ int main()
 
 	cout << "Starting packet capture... Press Ctrl+C to stop.\n";
 
-	// Start capture loop
+	// Main loop receiving packets and calling packet_handler to print info
 	if (pcap_loop(handle, 0, packet_handler, nullptr) < 0)
 	{
 		pcap_close(handle);
