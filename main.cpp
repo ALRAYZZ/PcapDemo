@@ -35,7 +35,7 @@ void packet_handler(u_char* user, const pcap_pkthdr* h, const u_char* bytes)
 
 int main()
 {
-	char errbuff[PCAP_ERRBUF_SIZE];
+	char errbuf[PCAP_ERRBUF_SIZE];
 
 	// 1 Find all devices
 	pcap_if_t* alldevs = nullptr;
@@ -49,18 +49,34 @@ int main()
 		print_error_and_exit("No devices found");
 	}
 
+	// List all devices
 	cout << "Available devices:\n";
 	int idx = 0;
 	for (pcap_if_t* d = alldevs; d; d = d->next)
 	{
-		cout << ++idx << ":" << (d->name ? d->name : "No name");
+		cout << ++idx << ": " << (d->name ? d->name : "No name");
 		if (d->description) cout << " - " << d->description;
 		cout << "\n";
 	}
 
-	// 2 Choose the first interface for simplicity
+	cout << "\nSelect interface number to capture (number): ";
+	int choice = 0;
+	cin >> choice;
+
+	if (choice < 1 || choice > idx)
+	{
+		pcap_freealldevs(alldevs);
+		print_error_and_exit("Invalid interface number");
+	}
+
+	// Find chosen device
 	pcap_if_t* dev = alldevs;
+	for (int i = 1; i < choice; ++i)
+	{
+		dev = dev->next;
+	}
 	cout << "\nOpening device: " << dev->name << "\n";
+
 
 	// 3 Open live capture (promiscuous mode, 65536 bytes, 1000ms timeout)
 	pcap_t* handle = pcap_open_live(dev->name, 65536, 1, 1000, errbuf);
