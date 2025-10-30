@@ -3,6 +3,7 @@
 #include <iomanip>
 #include <chrono>
 #include <ctime>
+#include <string>
 
 using namespace std;
 
@@ -78,21 +79,42 @@ int main()
 	cout << "\nOpening device: " << dev->name << "\n";
 
 
-	// 3 Open live capture (promiscuous mode, 65536 bytes, 1000ms timeout)
+	// Open live capture on selected device (promiscuous mode, 65536 bytes, 1000ms timeout)
 	pcap_t* handle = pcap_open_live(dev->name, 65536, 1, 1000, errbuf);
 	if (!handle)
 	{
 		pcap_freealldevs(alldevs);
 		print_error_and_exit("Could not open device", errbuf);
 	}
-
-	// Show link layer type
-	int linktype = pcap_datalink(handle);
-	cout << "Link layer type: " << linktype << "\n";
-
-	// 4 Start capture loop (0 = forever). Ctrl+C to stop.
-	cout << "Starting packet capture... Press Ctrl+C to stop.\n";
 	pcap_freealldevs(alldevs);
+
+	// Compile and set filter
+	// Filters: "tcp", "udp", "icmp", "port 80", etc.
+	cout << "Enter a BPF filter (or press enter for none): ";
+	cin.ignore(); // clear newline from previous input
+	string filter_str;
+	getline(cin, filter_str);
+
+	if (!filter_str.empty())
+	{
+		bpf_program fp;
+		if (pcap_compile(handle, &fp, filter_str.c_str(), 1, PCAP_NETMASK_UNKNOWN) == -1)
+		{
+			cerr << "Warning: Could not parse filter. Capturing all packets.\n";
+		}
+		else
+		{
+			if (pcap_setfilter(handle, &fp) == -1)
+			{
+				cerr << "Warning: Could not install filter. Capturing all packets.\n";
+			}
+			pcap_freecode(&fp);
+		}
+	}
+
+	cout << "Starting packet capture... Press Ctrl+C to stop.\n";
+
+	// Start capture loop
 	if (pcap_loop(handle, 0, packet_handler, nullptr) < 0)
 	{
 		pcap_close(handle);
