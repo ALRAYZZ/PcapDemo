@@ -92,7 +92,9 @@ struct FlowStats
 };
 
 unordered_map<FlowKey, FlowStats, FlowKeyHash> flow_table;
-
+bool show_all_packets = false; // show every packet if true
+double delta_threshold_ms = 0.0; // threshold for inter-arrival time display
+uint16_t watch_port = 0; // port to watch for special logging
 
 // helper: format MAC
 // Input: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]
@@ -233,11 +235,27 @@ void packet_handler(u_char* user, const pcap_pkthdr* h, const u_char* bytes)
 			stats.last_ts = h->ts;
 
 			// Print inter-arrival info
-			cout << " | flow_pkt=" << stats.packet_count
-				<< " flow_bytes=" << stats.byte_count;
-			if (stats.packet_count > 1)
+			bool should_print = show_all_packets;
+			
+			if (delta_ms > delta_threshold_ms)
 			{
-				cout << " Δt=" << delta_ms << " ms";
+				should_print = true;
+			}
+			if (watch_port && (src_port == watch_port || dst_port == watch_port))
+			{
+				should_print = true;
+			}
+
+			if (should_print)
+			{
+				cout << " | flow_pkt=" << stats.packet_count
+					<< " flow_bytes=" << stats.byte_count;
+
+				if (stats.packet_count > 1)
+				{
+					cout << " Δt=" << delta_ms << " ms";
+				}
+				cout << "\n";
 			}
 
 
@@ -296,23 +314,30 @@ void packet_handler(u_char* user, const pcap_pkthdr* h, const u_char* bytes)
 					(h->ts.tv_usec - stats.last_ts.tv_usec) / 1000.0;
 			}
 			stats.last_ts = h->ts;
-
+			
 			// Print inter-arrival info
-			cout << " | flow_pkt=" << stats.packet_count
-				<< " flow_bytes=" << stats.byte_count;
-			if (stats.packet_count > 1)
+			bool should_print = show_all_packets;
+
+			if (delta_ms > delta_threshold_ms)
 			{
-				cout << " Δt=" << delta_ms << " ms";
+				should_print = true;
+			}
+			if (watch_port && (src_port == watch_port || dst_port == watch_port))
+			{
+				should_print = true;
 			}
 
+			if (should_print)
+			{
+				cout << " | flow_pkt=" << stats.packet_count
+					<< " flow_bytes=" << stats.byte_count;
 
-
-			int payload_len = (int)udplen - 8; // UDP header is 8 bytes
-			if (payload_len < 0) payload_len = 0;
-
-			cout << " | UDP " << src_port << " -> " << dst_port
-				<< " len=" << udplen
-				<< " payload_len=" << payload_len << "\n";
+				if (stats.packet_count > 1)
+				{
+					cout << " Δt=" << delta_ms << " ms";
+				}
+				cout << "\n";
+			}
 		}
 		else
 		{
