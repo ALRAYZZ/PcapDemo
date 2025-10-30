@@ -1,10 +1,11 @@
-#include <pcap.h>
+﻿#include <pcap.h>
 #include <iostream>
 #include <iomanip>
 #include <chrono>
 #include <ctime>
 #include <string>
 #include <winsock2.h>
+#include <unordered_map>
 
 using namespace std;
 
@@ -52,6 +53,46 @@ struct UDPHeader
 	uint16_t checksum; // Checksum (digital fingerprint to check if packet data is intact)
 };
 #pragma pack(pop)
+
+struct FlowKey
+{
+	uint32_t src_ip;
+	uint32_t dst_ip;
+	uint16_t src_port;
+	uint16_t dst_port;
+	uint8_t protocol;
+
+	bool operator==(const FlowKey& other) const
+	{
+		return src_ip == other.src_ip &&
+			dst_ip == other.dst_ip &&
+			src_port == other.src_port &&
+			dst_port == other.dst_port &&
+			protocol == other.protocol;
+	}
+};
+
+struct FlowKeyHash
+{
+	size_t operator()(const FlowKey& key) const
+	{
+		return hash<uint32_t>()(key.src_ip) ^
+			hash<uint32_t>()(key.dst_ip) ^
+			hash<uint16_t>()(key.src_port) ^
+			hash<uint16_t>()(key.dst_port) ^
+			hash<uint8_t>()(key.protocol);
+	}
+};
+
+struct FlowStats
+{
+	uint64_t packet_count = 0;
+	uint64_t byte_count = 0;
+	timeval last_ts{}; // timestamp of last packet
+};
+
+unordered_map<FlowKey, FlowStats, FlowKeyHash> flow_table;
+
 
 // helper: format MAC
 // Input: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]
@@ -176,6 +217,30 @@ void packet_handler(u_char* user, const pcap_pkthdr* h, const u_char* bytes)
 			size_t tcp_header_bytes = data_offset * 4;
 			if (tcp_header_bytes < 20) tcp_header_bytes = 20; // minimum size
 
+			// FLOW TRACKING
+			FlowKey key{ ip->src_addr, ip->dst_addr, tcp->src_port, tcp->dst_port, protocol };
+			auto& stats = flow_table[key];
+
+			stats.packet_count++;
+			stats.byte_count += h->len;
+
+			double delta_ms = 0.0;
+			if (stats.packet_count > 1)
+			{
+				delta_ms = (h->ts.tv_sec - stats.last_ts.tv_sec) * 1000.0 +
+					(h->ts.tv_usec - stats.last_ts.tv_usec) / 1000.0;
+			}
+			stats.last_ts = h->ts;
+
+			// Print inter-arrival info
+			cout << " | flow_pkt=" << stats.packet_count
+				<< " flow_bytes=" << stats.byte_count;
+			if (stats.packet_count > 1)
+			{
+				cout << " Δt=" << delta_ms << " ms";
+			}
+
+
 			// flags
 			uint8_t flags = tcp->flags;
 			bool f_fin = flags & 0x01;
@@ -217,7 +282,32 @@ void packet_handler(u_char* user, const pcap_pkthdr* h, const u_char* bytes)
 			uint16_t dst_port = ntohs(udp->dst_port);
 			uint16_t udplen = ntohs(udp->length); // UDP length includes header
 
-			int payload_len = (int)udplen - 8; // UDP header is 8 byte	s
+			// FLOW TRACKING
+			FlowKey key{ ip->src_addr, ip->dst_addr, udp->src_port, udp->dst_port, protocol };
+			auto& stats = flow_table[key];
+
+			stats.packet_count++;
+			stats.byte_count += h->len;
+
+			double delta_ms = 0.0;
+			if (stats.packet_count > 1)
+			{
+				delta_ms = (h->ts.tv_sec - stats.last_ts.tv_sec) * 1000.0 +
+					(h->ts.tv_usec - stats.last_ts.tv_usec) / 1000.0;
+			}
+			stats.last_ts = h->ts;
+
+			// Print inter-arrival info
+			cout << " | flow_pkt=" << stats.packet_count
+				<< " flow_bytes=" << stats.byte_count;
+			if (stats.packet_count > 1)
+			{
+				cout << " Δt=" << delta_ms << " ms";
+			}
+
+
+
+			int payload_len = (int)udplen - 8; // UDP header is 8 bytes
 			if (payload_len < 0) payload_len = 0;
 
 			cout << " | UDP " << src_port << " -> " << dst_port
