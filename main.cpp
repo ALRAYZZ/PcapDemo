@@ -6,6 +6,8 @@
 #include <string>
 #include <winsock2.h>
 #include <unordered_map>
+#include <chrono>
+#include <iomanip>
 
 using namespace std;
 
@@ -95,6 +97,9 @@ unordered_map<FlowKey, FlowStats, FlowKeyHash> flow_table;
 bool show_all_packets = false; // show every packet if true
 double delta_threshold_ms = 0.0; // threshold for inter-arrival time display
 uint16_t watch_port = 0; // port to watch for special logging
+
+auto last_summary_time = chrono::steady_clock::now();
+const int summary_interval_sec = 2; // print summary every X seconds
 
 // helper: format MAC
 // Input: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]
@@ -352,6 +357,46 @@ void packet_handler(u_char* user, const pcap_pkthdr* h, const u_char* bytes)
 	{
 		cout << " | Non-IP packet\n";
 	}
+
+	// Periodic summary every few seconds
+	auto now = chrono::steady_clock::now();
+	auto elapsed = chrono::duration_cast<chrono::seconds>(now - last_summary_time).count();
+
+	if (elapsed >= summary_interval_sec)
+	{
+		system("cls"); // clear console (Windows-specific)
+		cout << "[Flow Summary @ " << ts_to_string(h) << "]\n";
+
+		cout << left << setw(20) << "SrcIP:Port"
+			<< setw(25) << "DstIP:Port"
+			<< setw(6) << "Proto"
+			<< setw(8) << "Pkts"
+			<< setw(10) << "Bytes"
+			<< setw(10) << "Last Δt(ms)"
+			<< "\n-------------------------------------------------------------------------\n";
+
+		for (const auto& kv : flow_table)
+		{
+			const FlowKey& key = kv.first;
+			const FlowStats& stats = kv.second;
+
+			string src = ipv4_to_string(key.src_ip) + ":" + to_string(ntohs(key.src_port));
+			string dst = ipv4_to_string(key.dst_ip) + ":" + to_string(ntohs(key.dst_port));
+			string proto = (key.protocol == 6) ? "TCP" : (key.protocol == 17) ? "UDP" : to_string(key.protocol);
+
+			cout << left << setw(20) << src
+				<< setw(25) << dst
+				<< setw(6) << proto
+				<< setw(8) << stats.packet_count
+				<< setw(10) << stats.byte_count
+				<< setw(10) << fixed << setprecision(1) << 0.0
+				<< "\n";
+		}
+
+		cout.flush();
+		last_summary_time = now;
+	}
+
 }
 
 int main()
