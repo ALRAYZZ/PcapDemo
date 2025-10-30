@@ -4,8 +4,89 @@
 #include <chrono>
 #include <ctime>
 #include <string>
+#include <winsock2.h>
 
 using namespace std;
+
+// Ensures no padding in structures
+#pragma pack(push, 1)
+struct EthHeader
+{
+	uint8_t dst[6];
+	uint8_t src[6];
+	uint16_t ethertype; // network byte order
+};
+
+struct IPv4Header
+{
+	uint8_t ver_ihl; // Version (4 bits) + Internet header length (4 bits)
+	uint8_t dscp_ecn; // DSCP (6 bits) + ECN (2 bits)
+	uint16_t total_length; // Total length
+	uint16_t identification; // Identification
+	uint16_t flags_frag; // Flags (3 bits) + Fragment offset (13 bits)
+	uint8_t ttl; // Time to live
+	uint8_t protocol; // Protocol
+	uint16_t hdr_checksum; // Header checksum
+	uint32_t src_addr; // Source address
+	uint32_t dst_addr; // Destination address
+};
+
+struct TCPHeader
+{
+	uint16_t src_port; // Source port
+	uint16_t dst_port; // Destination port
+	uint32_t seq_num; // Sequence number
+	uint32_t ack_num; // Acknowledgment number
+	uint8_t data_offset; // Data offset (4 bits) + Reserved (4 bits)
+	uint8_t flags; // CWR, ECE, URG, ACK, PSH, RST, SYN, FIN
+	uint16_t window; // Window size
+	uint16_t checksum; // Checksum
+	uint16_t urgent_ptr; // Urgent pointer
+};
+
+struct UDPHeader
+{
+	uint16_t src_port; // Source port
+	uint16_t dst_port; // Destination port
+	uint16_t length; // Length
+	uint16_t checksum; // Checksum (digital fingerprint to check if packet data is intact)
+};
+#pragma pack(pop)
+
+// helper: format MAC
+string mac_to_string(const uint8_t mac[6])
+{
+	char buf[32];
+	sprintf_s(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
+		mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+	return string(buf);
+}
+
+// helper: format IPv4
+string ipv4_to_string(uint32_t addr_be)
+{
+	uint32_t a = ntohl(addr_be);
+	uint8_t b1 = (a >> 24) & 0xFF;
+	uint8_t b2 = (a >> 16) & 0xFF;
+	uint8_t b3 = (a >> 8) & 0xFF;
+	uint8_t b4 = a & 0xFF;
+	char buf[32];
+	sprintf_s(buf, sizeof(buf), "%u.%u.%u.%u", b1, b2, b3, b4);
+	return string(buf);
+}
+
+// print timestamp helper
+string ts_to_string(const pcap_pkthdr* h)
+{
+	time_t secs = h->ts.tv_sec;
+	tm local_tm;
+	localtime_s(&local_tm, &secs);
+	char timebuf[64];
+	strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", &local_tm);
+	char out[128];
+	sprintf_s(out, sizeof(out), "%s.%06ld", timebuf, (unsigned)h->ts.tv_usec);
+	return string(out);
+}
 
 void print_error_and_exit(const string& msg, const char* err = nullptr)
 {
@@ -17,21 +98,139 @@ void print_error_and_exit(const string& msg, const char* err = nullptr)
 
 void packet_handler(u_char* user, const pcap_pkthdr* h, const u_char* bytes)
 {
-	// header-> ts is timeval struct (seconds + microseconds)
-	// Convert to readable time format
-	time_t secs = h->ts.tv_sec;
-	tm local_tm;
-	localtime_s(&local_tm, &secs);
-	char timebuf[64];
-	strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", &local_tm);
+	// Basic checks
+	if (!h || !bytes) return;
 
-	// Microseconds part
-	long usec = h->ts.tv_usec;
+	size_t caplen = h->caplen; // captured length
+	if (caplen < sizeof(EthHeader))
+	{
+		cout << "[" << ts_to_string(h) << "] Packet too short for Ethernet header\n";
+		return;
+	}
 
-	cout << "[" << timebuf << "." << setw(6) << setfill('0') << usec << "] "
-		 << "Captured Length: " << h->caplen << " bytes, "
-		<< "Original Length: " << h->len << " bytes" << endl;
-	// dont print packet bytes for readability
+	const EthHeader* eth = reinterpret_cast<const EthHeader*>(bytes);
+	uint16_t ethertype = ntohs(eth->ethertype); // ntohs/ntohl: convert network byte order to host byte order.
+
+	string src_mac = mac_to_string(eth->src);
+	string dst_mac = mac_to_string(eth->dst);
+
+	// Start output line with timestamp + linkinfo
+	cout << "[" << ts_to_string(h) << "]" << src_mac << " -> " << dst_mac << " ethertype=0x" << hex << ethertype << dec;
+
+	// Move pointer to L3
+	const u_char* l3 = bytes + sizeof(EthHeader);
+	size_t l3_len = (caplen >= sizeof(EthHeader)) ? (caplen - sizeof(EthHeader)) : 0;
+
+	if (ethertype == 0x0800 /* IPv4 */)
+	{
+		if (l3_len < sizeof(IPv4Header))
+		{
+			cout << " | truncated IPv4\n";
+			return;
+		}
+
+		const IPv4Header* ip = reinterpret_cast<const IPv4Header*>(l3);
+
+		int ihl = (ip->ver_ihl & 0x0F); // Internet Header Length in 32-bit words
+		size_t ip_header_bytes = ihl * 4;
+		if (ip_header_bytes < 20) ip_header_bytes = 20; // minimum size
+
+		if (l3_len < ip_header_bytes)
+		{
+			cout << " | truncated IPv4 header\n";
+			return;
+		}
+
+		uint16_t total_length = ntohs(ip->total_length);
+		string src_ip = ipv4_to_string(ip->src_addr);
+		string dst_ip = ipv4_to_string(ip->dst_addr);
+		uint8_t protocol = ip->protocol;
+
+		cout << " | IPv4 " << src_ip << " -> " << dst_ip << " protocol=" << (unsigned)protocol << " tot_len=" << total_length;
+
+		// point to l4 (start of transport header)
+		const u_char* l4 = l3 + ip_header_bytes;
+		size_t l4_len = (l3_len >= ip_header_bytes) ? (l3_len - ip_header_bytes) : 0;
+
+		if (protocol == 6 /* TCP */)
+		{
+			if (l4_len < sizeof(TCPHeader))
+			{
+				cout << " | truncated TCP\n";
+				return;
+			}
+
+			const TCPHeader* tcp = reinterpret_cast<const TCPHeader*>(l4);
+
+			uint16_t src_port = ntohs(tcp->src_port);
+			uint16_t dst_port = ntohs(tcp->dst_port);
+			uint32_t seq = ntohl(tcp->seq_num);
+			uint32_t ack = ntohl(tcp->ack_num);
+			int data_offset = (tcp->data_offset >> 4) & 0x0F; // in 32-bit words
+			size_t tcp_header_bytes = data_offset * 4;
+			if (tcp_header_bytes < 20) tcp_header_bytes = 20; // minimum size
+
+			// flags
+			uint8_t flags = tcp->flags;
+			bool f_fin = flags & 0x01;
+			bool f_syn = flags & 0x02;
+			bool f_rst = flags & 0x04;
+			bool f_psh = flags & 0x08;
+			bool f_ack = flags & 0x10;
+			bool f_urg = flags & 0x20;
+			bool f_ece = flags & 0x40;
+			bool f_cwr = flags & 0x80;
+
+			cout << " | TCP " << src_port << " -> " << dst_port
+				<< " seq=" << seq << " ack=" << ack
+				<< " flags=["
+				<< (f_fin ? "FIN " : "")
+				<< (f_syn ? "SYN " : "")
+				<< (f_rst ? "RST " : "")
+				<< (f_psh ? "PSH " : "")
+				<< (f_ack ? "ACK " : "")
+				<< (f_urg ? "URG " : "")
+				<< (f_ece ? "ECE " : "")
+				<< (f_cwr ? "CWR " : "")
+				<< "]";
+
+			// application palyoad length (from IP total_length - IP header - TCP header)
+			int payload_len = (int)total_length - (int)ip_header_bytes - (int)tcp_header_bytes;
+			if (payload_len < 0) payload_len = 0;
+			cout << " payload_len=" << payload_len << "\n";
+		}
+		else if (protocol == 17 /* UDP */)
+		{
+			if (l4_len < sizeof(UDPHeader))
+			{
+				cout << " | truncated UDP\n";
+				return;
+			}
+			const UDPHeader* udp = reinterpret_cast<const UDPHeader*>(l4);
+			uint16_t src_port = ntohs(udp->src_port);
+			uint16_t dst_port = ntohs(udp->dst_port);
+			uint16_t udplen = ntohs(udp->length); // UDP length includes header
+
+			int payload_len = (int)udplen - 8; // UDP header is 8 byte	s
+			if (payload_len < 0) payload_len = 0;
+
+			cout << " | UDP " << src_port << " -> " << dst_port
+				<< " len=" << udplen
+				<< " payload_len=" << payload_len << "\n";
+		}
+		else
+		{
+			cout << " | L4 protocol " << unsigned(protocol) << " not parsed\n";
+		}
+	}
+	else if (ethertype == 0x86DD /* IPv6 */)
+	{
+		cout << " | IPv6 packet (parsing not implemented)\n";
+	}
+	else
+	{
+		cout << " | Non-IP packet\n";
+	}
 }
 
 int main()
@@ -92,6 +291,8 @@ int main()
 	// Filters: "tcp", "udp", "icmp", "port 80", etc.
 	cout << "Enter a BPF filter (or press enter for none): ";
 	cin.ignore(); // clear newline from previous input
+
+	// Get filter string
 	string filter_str;
 	getline(cin, filter_str);
 
